@@ -293,15 +293,36 @@ export default function SessionsPage() {
                   <TableCell>
                     {session.startTime}-{session.endTime}
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                      {formatMinutes(durationMinutes(session.startTime, session.endTime))}
+                      {formatMinutes(durationMinutes(session.startTime, session.endTime))}（计划）
                     </Typography>
+                    {session.execution ? (
+                      <Typography variant="caption" color="info.main" sx={{ display: 'block' }}>
+                        实际 {session.execution.actualStartTime}-{session.execution.actualEndTime}
+                        {session.execution.actualNightId && session.execution.actualNightId !== session.nightId
+                          ? ` · 夜 ${nightById(session.execution.actualNightId)?.date ?? session.execution.actualNightId}`
+                          : ''}
+                      </Typography>
+                    ) : null}
                   </TableCell>
                   <TableCell>{targetById(session.targetId)?.name ?? '未知目标'}</TableCell>
                   <TableCell>
                     {telescopeById(session.telescopeId)?.code ?? '-'} / {instrumentById(session.instrumentId)?.model ?? '-'}
+                    {session.execution && session.execution.actualTelescopeId !== session.telescopeId ? (
+                      <Typography variant="caption" color="info.main" sx={{ display: 'block' }}>
+                        实际 {telescopeById(session.execution.actualTelescopeId)?.code ?? '-'}
+                      </Typography>
+                    ) : null}
                   </TableCell>
                   <TableCell>{session.filterSlot}</TableCell>
-                  <TableCell align="right">{session.plannedFrames}</TableCell>
+                  <TableCell align="right">
+                    {session.plannedFrames}
+                    {session.execution ? (
+                      <Typography variant="caption" color={session.plannedFrames - session.execution.actualFrames > 0 ? 'warning.main' : 'success.main'} sx={{ display: 'block' }}>
+                        实际 {session.execution.actualFrames}
+                        {session.plannedFrames - session.execution.actualFrames > 0 ? `（短拍 ${session.plannedFrames - session.execution.actualFrames}）` : ''}
+                      </Typography>
+                    ) : null}
+                  </TableCell>
                   <TableCell>
                     <StatusChip status={session.status} />
                   </TableCell>

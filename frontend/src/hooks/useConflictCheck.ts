@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
 import type { ConflictItem, ObsSession } from '../types';
 import { overlapMinutes } from '../utils/astro';
+import { effectiveEndTime, effectiveNightId, effectiveStartTime, effectiveTelescopeId } from '../utils/execution';
 
 export interface ConflictCheckInput {
   nightId: string;
@@ -21,20 +22,27 @@ export interface ConflictCheckApi {
   hasConflict: (sessionId: string) => boolean;
 }
 
+/** 比对两时段是否在同一望远镜上重叠；已执行段按实际夜/望远镜/时段判定（现场换设备后旧占用下线） */
 function describe(a: ObsSession, b: ObsSession): ConflictItem | null {
-  if (a.nightId !== b.nightId || a.telescopeId !== b.telescopeId || a.id === b.id) {
-    return null;
-  }
-  const overlap = overlapMinutes(a.startTime, a.endTime, b.startTime, b.endTime);
+  if (a.id === b.id) return null;
+  const aNight = effectiveNightId(a);
+  const bNight = effectiveNightId(b);
+  if (aNight !== bNight) return null;
+  const aTel = effectiveTelescopeId(a);
+  const bTel = effectiveTelescopeId(b);
+  if (aTel !== bTel) return null;
+  const overlap = overlapMinutes(effectiveStartTime(a), effectiveEndTime(a), effectiveStartTime(b), effectiveEndTime(b));
   if (overlap <= 0) {
     return null;
   }
-  const overlapStart = a.startTime > b.startTime ? a.startTime : b.startTime;
+  const aStart = effectiveStartTime(a);
+  const bStart = effectiveStartTime(b);
+  const overlapStart = aStart > bStart ? aStart : bStart;
   return {
     sessionId: a.id,
     otherId: b.id,
-    nightId: a.nightId,
-    telescopeId: a.telescopeId,
+    nightId: aNight,
+    telescopeId: aTel,
     overlapMinutes: overlap,
     overlapText: `${overlapStart} 起重叠 ${overlap} 分钟`,
   };
@@ -69,7 +77,8 @@ export function useConflictCheck(): ConflictCheckApi {
 
   const conflictsOfNight = useCallback(
     (nightId: string): ConflictItem[] => {
-      const scoped = sessions.filter((session) => session.nightId === nightId);
+      // 已执行段按实际观测夜归属，与设备占用图/总览口径一致（旧夜不再出现其冲突）
+      const scoped = sessions.filter((session) => effectiveNightId(session) === nightId);
       const result: ConflictItem[] = [];
       scoped.forEach((a) => {
         scoped.forEach((b) => {
@@ -87,7 +96,7 @@ export function useConflictCheck(): ConflictCheckApi {
   const conflictIds = useCallback(
     (nightId?: string): Set<string> => {
       const ids = new Set<string>();
-      const scoped = nightId ? sessions.filter((session) => session.nightId === nightId) : sessions;
+      const scoped = nightId ? sessions.filter((session) => effectiveNightId(session) === nightId) : sessions;
       scoped.forEach((a) => {
         scoped.forEach((b) => {
           const item = describe(a, b);

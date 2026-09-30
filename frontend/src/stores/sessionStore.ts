@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { db, deleteRow, persistRow, SCHEMA_VERSION } from '../hooks/usePersistentStore';
 import { uid } from '../utils/id';
 import type { ObsSession, SessionStatus } from '../types';
+import type { ReconcileResult } from '../utils/execution';
 
 export interface SessionInput {
   nightId: string;
@@ -27,6 +28,12 @@ interface SessionState {
   /** 批量改期到备用观测夜并填写改期原因 */
   rescheduleToBackup: (ids: string[], backupNightId: string, reason: string) => Promise<number>;
   updateStatus: (id: string, status: SessionStatus) => Promise<void>;
+  /**
+   * 整批导入执行回执：仅写入 execution 执行结果字段（实际时段/望远镜/帧数/批次号），
+   * 计划基线（nightId/startTime/endTime/telescopeId/plannedFrames）原样保留。
+   * 调用前须先通过 reconcileReceipt 校验；校验不通过时不得调用本方法，保证整批不入库。
+   */
+  importReceipt: (result: ReconcileResult) => Promise<number>;
 }
 
 /** 排程段与冲突检测所需数据 */
@@ -91,5 +98,24 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
   updateStatus: async (id, status) => {
     await get().updateSession(id, { status });
+  },
+
+  importReceipt: async (result) => {
+    if (!result.ok) return 0;
+    // 只写 execution 字段并把状态置为已完成；计划基线字段一律不动
+    const updated: ObsSession[] = result.items.map(({ session, execution }) => ({
+      ...session,
+      status: '已完成' as SessionStatus,
+      execution,
+      schemaVersion: SCHEMA_VERSION,
+    }));
+    // 整批事务：要么全部写入，要么全部不写（计划基线保持导入前原样）
+    await db.transaction('rw', db.sessions, async () => {
+      await db.sessions.bulkPut(updated);
+    });
+    set({
+      sessions: get().sessions.map((session) => updated.find((item) => item.id === session.id) ?? session),
+    });
+    return updated.length;
   },
 }));

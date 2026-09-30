@@ -25,10 +25,11 @@ import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
 import { NIGHT_TOTAL_MINUTES, TARGET_COLOR } from '../types';
 import { axisMinutes, minutesToTime } from '../utils/astro';
+import { effectiveEndTime, effectiveNightId, effectiveStartTime, effectiveTelescopeId } from '../utils/execution';
 
 const SLOT_MINUTES = 30;
 
-/** 望远镜与终端分配视图：行 = 设备、列 = 30 分钟时段，冲突格标红并可一键跳转 */
+/** 望远镜与终端分配视图：行 = 设备、列 = 30 分钟时段，冲突格标红并可一键跳转；已执行段按现场实际望远镜/时段重算（旧占用随之下线） */
 export default function EquipmentPage() {
   usePersistentStore();
   const navigate = useNavigate();
@@ -45,26 +46,27 @@ export default function EquipmentPage() {
   const [nightId, setNightId] = useState(currentNightId);
   const activeNightId = nightId || currentNightId;
   const night = nights.find((item) => item.id === activeNightId);
-  const nightSessions = useMemo(() => sessions.filter((session) => session.nightId === activeNightId), [sessions, activeNightId]);
+  // 已执行段按实际观测夜归属（现场换夜则旧夜占用下线、实际夜上线）
+  const nightSessions = useMemo(() => sessions.filter((session) => effectiveNightId(session) === activeNightId), [sessions, activeNightId]);
   const conflicts = useMemo(() => conflictsOfNight(activeNightId), [conflictsOfNight, activeNightId]);
   const slots = useMemo(() => Array.from({ length: NIGHT_TOTAL_MINUTES / SLOT_MINUTES }, (_, index) => index), []);
 
   const targetById = (id: string) => targets.find((target) => target.id === id);
   const pairedInstrument = (telescopeCode: string) => instruments.find((instrument) => instrument.telescopeCode === telescopeCode);
 
-  /** 某望远镜在某时段内的排程段 */
+  /** 某望远镜在某时段内的排程段（已执行段取实际望远镜与实际时段） */
   const occupancy = (telescopeId: string, slot: number) => {
     const slotStart = slot * SLOT_MINUTES;
     const slotEnd = slotStart + SLOT_MINUTES;
     return nightSessions
-      .filter((session) => session.telescopeId === telescopeId)
+      .filter((session) => effectiveTelescopeId(session) === telescopeId)
       .filter((session) => {
-        const start = axisMinutes(session.startTime);
-        const rawEnd = axisMinutes(session.endTime);
+        const start = axisMinutes(effectiveStartTime(session));
+        const rawEnd = axisMinutes(effectiveEndTime(session));
         const end = rawEnd <= start ? rawEnd + 1440 : rawEnd;
         return Math.min(end, slotEnd) - Math.max(start, slotStart) > 0;
       })
-      .sort((a, b) => axisMinutes(a.startTime) - axisMinutes(b.startTime));
+      .sort((a, b) => axisMinutes(effectiveStartTime(a)) - axisMinutes(effectiveStartTime(b)));
   };
 
   return (

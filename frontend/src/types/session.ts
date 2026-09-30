@@ -1,6 +1,28 @@
 /** 排程段状态 */
 export type SessionStatus = '待执行' | '进行中' | '已完成' | '因云取消';
 
+/** 执行结果（值守岗现场回执，排程岗按段号逐段对账后写入） */
+export interface ExecutionResult {
+  /** 回执批次号（同一份回执重导不重复生成执行记录） */
+  batchNo: string;
+  /** 实际观测夜 ID（现场换观测夜时以回执为准，缺省取计划夜） */
+  actualNightId?: string;
+  /** 实际开始时刻 HH:mm */
+  actualStartTime: string;
+  /** 实际结束时刻 HH:mm（可跨零点） */
+  actualEndTime: string;
+  /** 实际望远镜 ID（现场换望远镜时以回执为准） */
+  actualTelescopeId: string;
+  /** 实际拍摄帧数 */
+  actualFrames: number;
+  /** 值守备注（云量、遮挡、设备异常等） */
+  note?: string;
+  /** 回执导入时间（ISO） */
+  importedAt: string;
+  /** 值班人（回执头） */
+  dutyOfficer?: string;
+}
+
 /** 观测排程段 */
 export interface ObsSession {
   id: string;
@@ -26,6 +48,8 @@ export interface ObsSession {
   rescheduleReason?: string;
   /** 替补夜 ID（迁移时补齐） */
   backupNightId?: string;
+  /** 执行结果（现场回执对账后写入；计划基线字段保持原样，不被覆盖） */
+  execution?: ExecutionResult;
   /** 数据结构版本 */
   schemaVersion: number;
 }

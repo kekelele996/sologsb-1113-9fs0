@@ -20,8 +20,9 @@ import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
 import { NIGHT_TOTAL_MINUTES, TARGET_COLOR } from '../types';
 import { altitudeAt, axisMinutes, isBelowThreshold, minutesToTime, moonBrightnessFactor, moonConflict, moonPhaseText, timelineTicks } from '../utils/astro';
+import { effectiveEndTime, effectiveNightId, effectiveStartTime, effectiveTelescopeId } from '../utils/execution';
 
-/** 本夜编排总览：30 分钟刻度时间轴 + 月相与月出月落条带 + 冲突与标灰提示 */
+/** 本夜编排总览：30 分钟刻度时间轴 + 月相与月出月落条带 + 冲突与标灰提示；已执行段按现场实际时段/望远镜重算 */
 export default function OverviewPage() {
   usePersistentStore();
   const nights = useNightStore((s) => s.nights);
@@ -34,7 +35,8 @@ export default function OverviewPage() {
   const { conflictIds, conflictsOfNight } = useConflictCheck();
 
   const night = nights.find((item) => item.id === currentNightId) ?? nights[0];
-  const nightSessions = useMemo(() => sessions.filter((session) => session.nightId === night?.id), [sessions, night?.id]);
+  // 已执行段按实际观测夜归属（现场换夜则旧夜占用下线、实际夜上线）
+  const nightSessions = useMemo(() => sessions.filter((session) => effectiveNightId(session) === night?.id), [sessions, night?.id]);
   const ids = useMemo(() => conflictIds(night?.id), [conflictIds, night?.id]);
   const conflicts = useMemo(() => conflictsOfNight(night?.id ?? ''), [conflictsOfNight, night?.id]);
 
@@ -59,19 +61,23 @@ export default function OverviewPage() {
       nightSessions.map((session) => {
         const target = targetById(session.targetId);
         const altitude = altitudes.get(session.targetId);
-        const startMinute = Math.max(0, Math.min(NIGHT_TOTAL_MINUTES, axisMinutes(session.startTime)));
-        const rawEnd = axisMinutes(session.endTime);
+        // 已执行段按实际时段/望远镜绘制（占用随现场重算），未执行段按计划基线
+        const startMinute = Math.max(0, Math.min(NIGHT_TOTAL_MINUTES, axisMinutes(effectiveStartTime(session))));
+        const rawEnd = axisMinutes(effectiveEndTime(session));
         const endMinute = Math.max(startMinute + 20, Math.min(NIGHT_TOTAL_MINUTES, rawEnd <= startMinute ? rawEnd + 1440 : rawEnd));
+        const telId = effectiveTelescopeId(session);
         return {
           id: session.id,
           startMinute,
           endMinute,
-          label: `${target?.name ?? '未知目标'} · ${telescopeById(session.telescopeId)?.code ?? '-'}`,
+          label: `${target?.name ?? '未知目标'} · ${telescopeById(telId)?.code ?? '-'}`,
           color: target ? TARGET_COLOR[target.type] : '#607d8b',
           dimmed: session.status === '因云取消' || Boolean(altitude?.below),
-          tooltip: `${session.startTime}-${session.endTime} ${target?.name ?? ''}｜${telescopeById(session.telescopeId)?.code ?? '-'} / ${
-            instrumentById(session.instrumentId)?.model ?? '-'
-          }｜${session.filterSlot}｜${session.plannedFrames} 帧｜${session.status}｜评估高度角 ${altitude?.altitude ?? '-'}°`,
+          tooltip: `${effectiveStartTime(session)}-${effectiveEndTime(session)}${session.execution ? '（实际）' : ''} ${target?.name ?? ''}｜${
+            telescopeById(telId)?.code ?? '-'
+          } / ${instrumentById(session.instrumentId)?.model ?? '-'}｜${session.filterSlot}｜${
+            session.execution ? `${session.execution.actualFrames} 帧（计划 ${session.plannedFrames}）` : `${session.plannedFrames} 帧`
+          }｜${session.status}｜评估高度角 ${altitude?.altitude ?? '-'}°`,
         };
       }),
     [nightSessions, targets, altitudes, telescopes, instruments],
@@ -246,22 +252,32 @@ export default function OverviewPage() {
         </Typography>
         <Stack spacing={1}>
           {[...nightSessions]
-            .sort((a, b) => axisMinutes(a.startTime) - axisMinutes(b.startTime))
+            .sort((a, b) => axisMinutes(effectiveStartTime(a)) - axisMinutes(effectiveStartTime(b)))
             .map((session) => {
               const target = targetById(session.targetId);
               const altitude = altitudes.get(session.targetId);
+              const executed = Boolean(session.execution);
+              const telId = effectiveTelescopeId(session);
               return (
                 <Card key={session.id} variant="outlined">
                   <CardContent sx={{ py: 1.25, '&:last-child': { pb: 1.25 } }}>
                     <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap">
-                      <Chip size="small" label={`${session.startTime}-${session.endTime}`} />
+                      <Chip size="small" label={`${effectiveStartTime(session)}-${effectiveEndTime(session)}${executed ? '（实际）' : ''}`} />
+                      {executed ? (
+                        <Chip size="small" variant="outlined" color="default" label={`计划 ${session.startTime}-${session.endTime}`} sx={{ textDecoration: 'line-through', opacity: 0.7 }} />
+                      ) : null}
                       <Typography variant="subtitle2">{target ? `${target.name}（${target.catalog}）` : '未知目标'}</Typography>
-                      <Chip size="small" variant="outlined" label={`${telescopeById(session.telescopeId)?.code ?? '-'} / ${instrumentById(session.instrumentId)?.model ?? '-'}`} />
+                      <Chip size="small" variant="outlined" label={`${telescopeById(telId)?.code ?? '-'} / ${instrumentById(session.instrumentId)?.model ?? '-'}`} />
                       <Chip size="small" variant="outlined" label={`滤镜 ${session.filterSlot}`} />
-                      <Chip size="small" variant="outlined" label={`${session.plannedFrames} 帧 × ${target?.exposureSec ?? '-'}s`} />
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        label={executed ? `${session.execution!.actualFrames} 帧（计划 ${session.plannedFrames}）× ${target?.exposureSec ?? '-'}s` : `${session.plannedFrames} 帧 × ${target?.exposureSec ?? '-'}s`}
+                      />
                       <StatusChip status={session.status} />
                       {ids.has(session.id) ? <Chip size="small" color="error" label="时段冲突" /> : null}
                       {altitude?.below ? <Chip size="small" color="warning" label={`高度角 ${altitude.altitude}° 低于阈值 ${target?.minAltitude}°`} /> : <Chip size="small" color="success" variant="outlined" label={`高度角 ${altitude?.altitude ?? '-'}°`} />}
+                      {executed ? <Chip size="small" color="info" variant="outlined" label={`回执 ${session.execution!.batchNo}`} /> : null}
                       {session.rescheduleReason ? <Typography variant="caption" color="text.secondary">{session.rescheduleReason}</Typography> : null}
                     </Stack>
                   </CardContent>

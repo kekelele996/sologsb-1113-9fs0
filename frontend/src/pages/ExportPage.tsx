@@ -19,9 +19,10 @@ import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
 import { NIGHT_TOTAL_MINUTES, TARGET_COLOR } from '../types';
 import { axisMinutes, timelineTicks } from '../utils/astro';
+import { effectiveEndTime, effectiveNightId, effectiveStartTime, effectiveTelescopeId } from '../utils/execution';
 import { buildNightPlanText, buildPlanCsv, downloadText, printPage } from '../utils/export';
 
-/** 导出当晚观测清单（文本 / CSV / 打印视图） */
+/** 导出当晚观测清单（文本 / CSV / 打印视图）；已执行段按实际夜归属并携带执行结果 */
 export default function ExportPage() {
   usePersistentStore();
   const nights = useNightStore((s) => s.nights);
@@ -35,7 +36,8 @@ export default function ExportPage() {
   const [notice, setNotice] = useState('');
 
   const night = nights.find((item) => item.id === currentNightId) ?? nights[0];
-  const nightSessions = useMemo(() => sessions.filter((session) => session.nightId === night?.id), [sessions, night?.id]);
+  // 已执行段按实际观测夜归属（现场换夜则随实际夜导出）
+  const nightSessions = useMemo(() => sessions.filter((session) => effectiveNightId(session) === night?.id), [sessions, night?.id]);
   const conflicts = useMemo(() => conflictsOfNight(night?.id ?? ''), [conflictsOfNight, night?.id]);
   const ids = useMemo(() => conflictIds(night?.id), [conflictIds, night?.id]);
 
@@ -52,8 +54,9 @@ export default function ExportPage() {
     () =>
       nightSessions.map((session) => {
         const target = targets.find((item) => item.id === session.targetId);
-        const startMinute = Math.max(0, Math.min(NIGHT_TOTAL_MINUTES, axisMinutes(session.startTime)));
-        const rawEnd = axisMinutes(session.endTime);
+        const startMinute = Math.max(0, Math.min(NIGHT_TOTAL_MINUTES, axisMinutes(effectiveStartTime(session))));
+        const rawEnd = axisMinutes(effectiveEndTime(session));
+        const telId = effectiveTelescopeId(session);
         return {
           id: session.id,
           startMinute,
@@ -61,10 +64,10 @@ export default function ExportPage() {
           label: target?.name ?? '未知目标',
           color: target ? TARGET_COLOR[target.type] : '#607d8b',
           dimmed: session.status === '因云取消',
-          tooltip: `${session.startTime}-${session.endTime} · ${session.filterSlot} · ${session.plannedFrames} 帧 · ${session.status}`,
+          tooltip: `${effectiveStartTime(session)}-${effectiveEndTime(session)}${session.execution ? '（实际）' : ''} · ${telescopes.find((t) => t.id === telId)?.code ?? '-'} · ${session.filterSlot} · ${session.execution?.actualFrames ?? session.plannedFrames} 帧 · ${session.status}`,
         };
       }),
-    [nightSessions, targets],
+    [nightSessions, targets, telescopes],
   );
 
   return (
@@ -136,15 +139,17 @@ export default function ExportPage() {
           </Typography>
           <Stack spacing={1}>
             {[...nightSessions]
-              .sort((a, b) => axisMinutes(a.startTime) - axisMinutes(b.startTime))
+              .sort((a, b) => axisMinutes(effectiveStartTime(a)) - axisMinutes(effectiveStartTime(b)))
               .map((session) => {
                 const target = targets.find((item) => item.id === session.targetId);
+                const executed = Boolean(session.execution);
                 return (
                   <Stack key={session.id} direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                    <Chip size="small" label={`${session.startTime}-${session.endTime}`} />
+                    <Chip size="small" label={`${effectiveStartTime(session)}-${effectiveEndTime(session)}${executed ? '（实际）' : ''}`} />
                     <Typography variant="body2">{target?.name ?? '未知目标'}</Typography>
                     <Chip size="small" variant="outlined" label={session.filterSlot} />
-                    <Chip size="small" variant="outlined" label={`${session.plannedFrames} 帧`} />
+                    <Chip size="small" variant="outlined" label={executed ? `${session.execution!.actualFrames}/${session.plannedFrames} 帧` : `${session.plannedFrames} 帧`} />
+                    {executed ? <Chip size="small" color="info" variant="outlined" label={`回执 ${session.execution!.batchNo}`} /> : null}
                     <StatusChip status={session.status} />
                   </Stack>
                 );
