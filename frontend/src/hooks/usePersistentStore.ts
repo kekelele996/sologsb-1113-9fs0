@@ -1,12 +1,14 @@
 import Dexie, { type Table } from 'dexie';
 import { useEffect, useState } from 'react';
-import type { Instrument, ObsNight, ObsSession, ObsTarget, Telescope } from '../types';
+import type { ExecutionBatch, ExecutionRecord, Instrument, ObsNight, ObsSession, ObsTarget, ReceiptContext, Telescope } from '../types';
+import { buildBatchAndRecords, receiptSignature, parseReceipt } from '../utils/receipt';
+import { SAMPLE_RECEIPT } from '../utils/sampleReceipt';
 
 /** IndexedDB 库名（浏览器本地存储，无后端） */
 export const DB_NAME = 'gbobsplan-db';
 
 /** 当前数据结构版本，写入每条记录并用于升级迁移判定 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 class ObsPlanDB extends Dexie {
   targets!: Table<ObsTarget, string>;
@@ -14,6 +16,8 @@ class ObsPlanDB extends Dexie {
   telescopes!: Table<Telescope, string>;
   instruments!: Table<Instrument, string>;
   nights!: Table<ObsNight, string>;
+  executionBatches!: Table<ExecutionBatch, string>;
+  executionRecords!: Table<ExecutionRecord, string>;
   meta!: Table<{ key: string; value: string }, string>;
 
   constructor() {
@@ -55,12 +59,33 @@ class ObsPlanDB extends Dexie {
             }
           });
       });
+
+    // v3：新增执行回执批次 / 执行记录两表，支撑逐段对账（计划基线 sessions 不做任何字段变更）
+    this.version(3)
+      .stores({
+        targets: 'id, name, catalog, type, priority, magnitude',
+        sessions: 'id, nightId, targetId, telescopeId, instrumentId, startTime, status, backupNightId',
+        telescopes: 'id, code, status',
+        instruments: 'id, model, telescopeCode, terminalType',
+        nights: 'id, date, siteName, primary, backup',
+        executionBatches: 'batchNo, nightId, receivedAt',
+        executionRecords: 'id, batchNo, sessionId, actualNightId, actualTelescopeId',
+        meta: 'key',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('sessions')
+          .toCollection()
+          .modify((row: ObsSession) => {
+            row.schemaVersion = SCHEMA_VERSION;
+          });
+      });
   }
 }
 
 export const db = new ObsPlanDB();
 
-export type TableName = 'targets' | 'sessions' | 'telescopes' | 'instruments' | 'nights';
+export type TableName = 'targets' | 'sessions' | 'telescopes' | 'instruments' | 'nights' | 'executionBatches' | 'executionRecords';
 
 /** 写入单条记录（Dexie 读写封装，store 的增删改统一走这里） */
 export async function persistRow(table: TableName, row: unknown): Promise<void> {
@@ -134,18 +159,36 @@ const SEED_SESSIONS: ObsSession[] = [
   { id: 's-14', nightId: 'night-002', targetId: 'target-001', startTime: '02:10', endTime: '03:10', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'L', plannedFrames: 30, status: '待执行', schemaVersion: SCHEMA_VERSION },
 ];
 
+/**
+ * 示例整夜执行回执（RCP-20251011-01）：
+ * s-01 略短、s-03 顺延、s-05 短拍、s-08 现场从 T-02 换到 T-01 且短拍；
+ * 签名与 utils/sampleReceipt 的 SAMPLE_RECEIPT 解析结果一致，重导示例回执天然幂等。
+ */
+const SEED_EXECUTION_CONTEXT: ReceiptContext = {
+  sessions: SEED_SESSIONS.map((session) => ({ id: session.id, nightId: session.nightId })),
+  nights: SEED_NIGHTS.map((night) => ({ id: night.id, date: night.date })),
+  telescopes: SEED_TELESCOPES.map((telescope) => ({ id: telescope.id, code: telescope.code })),
+  batches: [],
+  occupied: new Map(),
+};
+
+const SEED_PARSED_RECEIPT = parseReceipt(SAMPLE_RECEIPT);
+const SEED_RECEIPT_SIGNATURE = receiptSignature(SEED_PARSED_RECEIPT.batchNo, SEED_PARSED_RECEIPT.rows);
+const SEED_EXECUTION = buildBatchAndRecords(SEED_PARSED_RECEIPT, SEED_RECEIPT_SIGNATURE, SEED_EXECUTION_CONTEXT, SCHEMA_VERSION, '2025-10-12T07:05:00.000Z');
+
 /** 首次打开（表内无数据）时写入示例数据 */
 export async function seedIfEmpty(): Promise<void> {
   const flag = await db.meta.get('seeded');
   if (flag) return;
-  const [targetCount, sessionCount, telescopeCount, instrumentCount, nightCount] = await Promise.all([
+  const [targetCount, sessionCount, telescopeCount, instrumentCount, nightCount, batchCount] = await Promise.all([
     db.targets.count(),
     db.sessions.count(),
     db.telescopes.count(),
     db.instruments.count(),
     db.nights.count(),
+    db.executionBatches.count(),
   ]);
-  // Dexie 的 transaction 最多接受 5 张表 + 作用域，因此 meta 标记在事务外写入
+  // Dexie 的 transaction 最多接受 5 张表 + 作用域，因此执行回执两表单独一个事务、meta 标记在事务外写入
   await db.transaction('rw', db.targets, db.sessions, db.telescopes, db.instruments, db.nights, async () => {
     if (targetCount === 0) await db.targets.bulkPut(SEED_TARGETS);
     if (nightCount === 0) await db.nights.bulkPut(SEED_NIGHTS);
@@ -153,22 +196,30 @@ export async function seedIfEmpty(): Promise<void> {
     if (instrumentCount === 0) await db.instruments.bulkPut(SEED_INSTRUMENTS);
     if (sessionCount === 0) await db.sessions.bulkPut(SEED_SESSIONS);
   });
+  await db.transaction('rw', db.executionBatches, db.executionRecords, async () => {
+    if (batchCount === 0) {
+      await db.executionBatches.put(SEED_EXECUTION.batch);
+      await db.executionRecords.bulkPut(SEED_EXECUTION.records);
+    }
+  });
   await db.meta.put({ key: 'seeded', value: new Date().toISOString() });
 }
 
 /** 把 Dexie 数据同步到各 Zustand store（动态 import 规避模块循环依赖） */
 export async function hydrateAllStores(): Promise<void> {
-  const [{ useTargetStore }, { useSessionStore }, { useEquipmentStore }, { useNightStore }] = await Promise.all([
+  const [{ useTargetStore }, { useSessionStore }, { useEquipmentStore }, { useNightStore }, { useExecutionStore }] = await Promise.all([
     import('../stores/targetStore'),
     import('../stores/sessionStore'),
     import('../stores/equipmentStore'),
     import('../stores/nightStore'),
+    import('../stores/executionStore'),
   ]);
   await Promise.all([
     useTargetStore.getState().hydrate(),
     useSessionStore.getState().hydrate(),
     useEquipmentStore.getState().hydrate(),
     useNightStore.getState().hydrate(),
+    useExecutionStore.getState().hydrate(),
   ]);
 }
 

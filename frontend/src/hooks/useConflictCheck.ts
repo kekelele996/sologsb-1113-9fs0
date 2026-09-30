@@ -1,7 +1,9 @@
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
+import { useExecutionStore } from '../stores/executionStore';
 import type { ConflictItem, ObsSession } from '../types';
 import { overlapMinutes } from '../utils/astro';
+import { toEffectiveSessions, toOccupancySession, type EffectiveSession } from '../utils/effective';
 
 export interface ConflictCheckInput {
   nightId: string;
@@ -14,11 +16,13 @@ export interface ConflictCheckInput {
 
 export interface ConflictCheckApi {
   findConflicts: (input: ConflictCheckInput) => ConflictItem[];
-  /** 某一观测夜内的全部冲突（两两比对同一望远镜的重叠时段） */
+  /** 某一观测夜内的全部冲突（按实际时段 / 实际望远镜两两比对） */
   conflictsOfNight: (nightId: string) => ConflictItem[];
   /** 冲突排程段 id 集合（可传观测夜过滤） */
   conflictIds: (nightId?: string) => Set<string>;
   hasConflict: (sessionId: string) => boolean;
+  /** 实际口径排程（有执行记录的段以现场实际夜 / 时段 / 设备为准） */
+  effectiveSessions: EffectiveSession[];
 }
 
 function describe(a: ObsSession, b: ObsSession): ConflictItem | null {
@@ -40,36 +44,37 @@ function describe(a: ObsSession, b: ObsSession): ConflictItem | null {
   };
 }
 
-/** 输入设备与时段区间即返回冲突排程段数组；被排程段列表与设备分配视图消费 */
+/**
+ * 输入设备与时段区间即返回冲突排程段数组。
+ * 比对基础为「实际口径」：现场换望远镜或观测夜后，旧占用下线、占用按实际时段重算。
+ */
 export function useConflictCheck(): ConflictCheckApi {
   const sessions = useSessionStore((s) => s.sessions);
+  const records = useExecutionStore((s) => s.records);
+
+  // 执行记录覆盖计划时段 / 设备；设备占用图与总览消费同一份有效排程
+  const effectiveSessions = useMemo(() => toEffectiveSessions(sessions, records), [sessions, records]);
 
   const findConflicts = useCallback(
     (input: ConflictCheckInput): ConflictItem[] => {
-      const candidate: ObsSession = {
+      const candidate = toOccupancySession({
         id: input.ignoreSessionId ?? '__candidate__',
         nightId: input.nightId,
-        targetId: '',
         startTime: input.startTime,
         endTime: input.endTime,
         telescopeId: input.telescopeId,
-        instrumentId: '',
-        filterSlot: '',
-        plannedFrames: 0,
-        status: '待执行',
-        schemaVersion: 2,
-      };
-      return sessions
+      });
+      return effectiveSessions
         .filter((session) => session.id !== input.ignoreSessionId)
         .map((session) => describe(candidate, session))
         .filter((item): item is ConflictItem => item !== null);
     },
-    [sessions],
+    [effectiveSessions],
   );
 
   const conflictsOfNight = useCallback(
     (nightId: string): ConflictItem[] => {
-      const scoped = sessions.filter((session) => session.nightId === nightId);
+      const scoped = effectiveSessions.filter((session) => session.nightId === nightId);
       const result: ConflictItem[] = [];
       scoped.forEach((a) => {
         scoped.forEach((b) => {
@@ -81,13 +86,13 @@ export function useConflictCheck(): ConflictCheckApi {
       });
       return result;
     },
-    [sessions],
+    [effectiveSessions],
   );
 
   const conflictIds = useCallback(
     (nightId?: string): Set<string> => {
       const ids = new Set<string>();
-      const scoped = nightId ? sessions.filter((session) => session.nightId === nightId) : sessions;
+      const scoped = nightId ? effectiveSessions.filter((session) => session.nightId === nightId) : effectiveSessions;
       scoped.forEach((a) => {
         scoped.forEach((b) => {
           const item = describe(a, b);
@@ -99,10 +104,10 @@ export function useConflictCheck(): ConflictCheckApi {
       });
       return ids;
     },
-    [sessions],
+    [effectiveSessions],
   );
 
   const hasConflict = useCallback((sessionId: string) => conflictIds().has(sessionId), [conflictIds]);
 
-  return { findConflicts, conflictsOfNight, conflictIds, hasConflict };
+  return { findConflicts, conflictsOfNight, conflictIds, hasConflict, effectiveSessions };
 }

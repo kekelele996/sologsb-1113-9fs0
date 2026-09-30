@@ -18,8 +18,10 @@ import { useNightStore } from '../stores/nightStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
+import { useExecutionStore } from '../stores/executionStore';
 import { NIGHT_TOTAL_MINUTES, TARGET_COLOR } from '../types';
 import { altitudeAt, axisMinutes, isBelowThreshold, minutesToTime, moonBrightnessFactor, moonConflict, moonPhaseText, timelineTicks } from '../utils/astro';
+import { toEffectiveSessions } from '../utils/effective';
 
 /** 本夜编排总览：30 分钟刻度时间轴 + 月相与月出月落条带 + 冲突与标灰提示 */
 export default function OverviewPage() {
@@ -28,15 +30,22 @@ export default function OverviewPage() {
   const currentNightId = useNightStore((s) => s.currentNightId);
   const setCurrentNight = useNightStore((s) => s.setCurrentNight);
   const sessions = useSessionStore((s) => s.sessions);
+  const records = useExecutionStore((s) => s.records);
   const targets = useTargetStore((s) => s.targets);
   const telescopes = useEquipmentStore((s) => s.telescopes);
   const instruments = useEquipmentStore((s) => s.instruments);
-  const { conflictIds, conflictsOfNight } = useConflictCheck();
+  const { conflictIds, conflictsOfNight, effectiveSessions } = useConflictCheck();
 
   const night = nights.find((item) => item.id === currentNightId) ?? nights[0];
-  const nightSessions = useMemo(() => sessions.filter((session) => session.nightId === night?.id), [sessions, night?.id]);
+  // 总览按实际口径：现场换夜 / 换镜 / 改时段后，时间轴与占用以实际为准
+  const nightSessions = useMemo(
+    () => effectiveSessions.filter((session) => session.nightId === night?.id),
+    [effectiveSessions, night?.id],
+  );
   const ids = useMemo(() => conflictIds(night?.id), [conflictIds, night?.id]);
   const conflicts = useMemo(() => conflictsOfNight(night?.id ?? ''), [conflictsOfNight, night?.id]);
+  /** 本夜各段的执行记录（含从别的计划夜换夜到本夜的段） */
+  const nightExecutions = useMemo(() => records.filter((record) => record.actualNightId === night?.id), [records, night?.id]);
 
   /** 以夜间 22:00 作为高度角评估时刻 */
   const evaluateDate = useMemo(() => new Date(`${night?.date ?? '2025-10-11'}T22:00:00`), [night?.date]);
@@ -44,6 +53,7 @@ export default function OverviewPage() {
   const targetById = (id: string) => targets.find((target) => target.id === id);
   const telescopeById = (id: string) => telescopes.find((item) => item.id === id);
   const instrumentById = (id: string) => instruments.find((item) => item.id === id);
+  const nightById = (id: string) => nights.find((item) => item.id === id);
 
   const altitudes = useMemo(() => {
     const map = new Map<string, { altitude: number; below: boolean }>();
@@ -62,22 +72,37 @@ export default function OverviewPage() {
         const startMinute = Math.max(0, Math.min(NIGHT_TOTAL_MINUTES, axisMinutes(session.startTime)));
         const rawEnd = axisMinutes(session.endTime);
         const endMinute = Math.max(startMinute + 20, Math.min(NIGHT_TOTAL_MINUTES, rawEnd <= startMinute ? rawEnd + 1440 : rawEnd));
+        const actualFrames = session.execution?.actualFrames;
         return {
           id: session.id,
           startMinute,
           endMinute,
-          label: `${target?.name ?? '未知目标'} · ${telescopeById(session.telescopeId)?.code ?? '-'}`,
+          label: `${target?.name ?? '未知目标'} · ${telescopeById(session.telescopeId)?.code ?? '-'}${session.deviated ? ' *' : ''}`,
           color: target ? TARGET_COLOR[target.type] : '#607d8b',
           dimmed: session.status === '因云取消' || Boolean(altitude?.below),
-          tooltip: `${session.startTime}-${session.endTime} ${target?.name ?? ''}｜${telescopeById(session.telescopeId)?.code ?? '-'} / ${
-            instrumentById(session.instrumentId)?.model ?? '-'
-          }｜${session.filterSlot}｜${session.plannedFrames} 帧｜${session.status}｜评估高度角 ${altitude?.altitude ?? '-'}°`,
+          tooltip: [
+            `${session.startTime}-${session.endTime} ${target?.name ?? ''}｜${telescopeById(session.telescopeId)?.code ?? '-'} / ${instrumentById(session.instrumentId)?.model ?? '-'}`,
+            session.execution
+              ? `实际 ${actualFrames} 帧（计划 ${session.plannedFrames}，差额 ${(actualFrames ?? 0) - session.plannedFrames >= 0 ? '+' : ''}${(actualFrames ?? 0) - session.plannedFrames}）｜现场执行${session.deviated ? '，与计划基线有偏差 *' : ''}`
+              : `计划 ${session.plannedFrames} 帧｜${session.status}`,
+            session.execution ? `计划基线 ${session.baseline.startTime}-${session.baseline.endTime} · ${telescopeById(session.baseline.telescopeId)?.code ?? '-'}` : '',
+            `评估高度角 ${altitude?.altitude ?? '-'}°`,
+          ]
+            .filter(Boolean)
+            .join('\n'),
         };
       }),
     [nightSessions, targets, altitudes, telescopes, instruments],
   );
 
-  const totalFrames = nightSessions.reduce((sum, session) => sum + session.plannedFrames, 0);
+  /** 计划帧数（基线合计）与实际帧数（有回执按现场，无回执按计划） */
+  const totalPlannedFrames = nightSessions.reduce((sum, session) => sum + session.plannedFrames, 0);
+  const totalActualFrames = nightSessions.reduce(
+    (sum, session) => sum + (session.execution ? session.execution.actualFrames : session.plannedFrames),
+    0,
+  );
+  const shortShotCount = nightSessions.filter((session) => session.execution && session.execution.actualFrames < session.plannedFrames).length;
+  const deviatedCount = nightSessions.filter((session) => session.deviated).length;
   const dimmedTargets = useMemo(
     () => Array.from(new Set(nightSessions.map((session) => session.targetId))).filter((id) => altitudes.get(id)?.below),
     [nightSessions, altitudes],
@@ -120,40 +145,42 @@ export default function OverviewPage() {
         <ConflictBadge conflicts={conflicts} />
       </Stack>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, 1fr)' }, gap: 2, mb: 2 }}>
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(3, 1fr)' }, gap: 2, mb: 2 }}>
         <Card variant="outlined">
           <CardContent>
             <Typography variant="caption" color="text.secondary">
-              本夜排程段
+              本夜排程段（实际口径）
             </Typography>
             <Typography variant="h5">{nightSessions.length}</Typography>
-          </CardContent>
-        </Card>
-        <Card variant="outlined">
-          <CardContent>
             <Typography variant="caption" color="text.secondary">
-              计划帧数
+              已回执 {nightExecutions.length} 段
             </Typography>
-            <Typography variant="h5">{totalFrames}</Typography>
           </CardContent>
         </Card>
         <Card variant="outlined">
           <CardContent>
             <Typography variant="caption" color="text.secondary">
-              设备冲突
+              帧数：计划 → 实际
+            </Typography>
+            <Typography variant="h5">
+              {totalPlannedFrames} → {totalActualFrames}
+            </Typography>
+            <Typography variant="caption" color={shortShotCount ? 'error.main' : 'text.secondary'}>
+              差额 {totalActualFrames - totalPlannedFrames >= 0 ? '+' : ''}
+              {totalActualFrames - totalPlannedFrames} · 短拍 {shortShotCount} 段
+            </Typography>
+          </CardContent>
+        </Card>
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="caption" color="text.secondary">
+              设备冲突（按实际时段重算）
             </Typography>
             <Typography variant="h5" color={conflicts.length ? 'error.main' : 'success.main'}>
               {conflicts.length}
             </Typography>
-          </CardContent>
-        </Card>
-        <Card variant="outlined">
-          <CardContent>
-            <Typography variant="caption" color="text.secondary">
-              低于高度阈值（标灰）
-            </Typography>
-            <Typography variant="h5" color={dimmedTargets.length ? 'warning.main' : 'success.main'}>
-              {dimmedTargets.length}
+            <Typography variant="caption" color={deviatedCount ? 'warning.main' : 'text.secondary'}>
+              现场偏差 {deviatedCount} 段（换镜 / 换夜 / 改时段）
             </Typography>
           </CardContent>
         </Card>
@@ -242,7 +269,7 @@ export default function OverviewPage() {
 
       <Box sx={{ mt: 2 }}>
         <Typography variant="subtitle1" sx={{ mb: 1 }}>
-          本夜排程段（{nightSessions.length} 段）
+          本夜排程段（{nightSessions.length} 段，按现场实际口径；* 表示与计划基线有偏差）
         </Typography>
         <Stack spacing={1}>
           {[...nightSessions]
@@ -250,19 +277,37 @@ export default function OverviewPage() {
             .map((session) => {
               const target = targetById(session.targetId);
               const altitude = altitudes.get(session.targetId);
+              const frameDelta = session.execution ? session.execution.actualFrames - session.plannedFrames : 0;
               return (
-                <Card key={session.id} variant="outlined">
+                <Card key={session.id} variant="outlined" sx={session.deviated ? { borderColor: 'warning.light', boxShadow: 'inset 3px 0 0 #ed6c02' } : undefined}>
                   <CardContent sx={{ py: 1.25, '&:last-child': { pb: 1.25 } }}>
                     <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap">
-                      <Chip size="small" label={`${session.startTime}-${session.endTime}`} />
+                      <Chip size="small" color={session.deviated ? 'warning' : 'default'} variant={session.deviated ? 'filled' : 'outlined'} label={`${session.startTime}-${session.endTime}`} />
                       <Typography variant="subtitle2">{target ? `${target.name}（${target.catalog}）` : '未知目标'}</Typography>
                       <Chip size="small" variant="outlined" label={`${telescopeById(session.telescopeId)?.code ?? '-'} / ${instrumentById(session.instrumentId)?.model ?? '-'}`} />
                       <Chip size="small" variant="outlined" label={`滤镜 ${session.filterSlot}`} />
-                      <Chip size="small" variant="outlined" label={`${session.plannedFrames} 帧 × ${target?.exposureSec ?? '-'}s`} />
+                      {session.execution ? (
+                        <Chip
+                          size="small"
+                          color={frameDelta < 0 ? 'error' : frameDelta > 0 ? 'primary' : 'success'}
+                          label={`实际 ${session.execution.actualFrames} 帧（计划 ${session.plannedFrames}，${frameDelta >= 0 ? '+' : ''}${frameDelta}）`}
+                        />
+                      ) : (
+                        <Chip size="small" variant="outlined" label={`${session.plannedFrames} 帧 × ${target?.exposureSec ?? '-'}s`} />
+                      )}
                       <StatusChip status={session.status} />
                       {ids.has(session.id) ? <Chip size="small" color="error" label="时段冲突" /> : null}
+                      {session.execution ? (
+                        <Chip size="small" color="success" variant="outlined" label={`批次 ${session.execution.batchNo}`} />
+                      ) : null}
+                      {session.deviated ? (
+                        <Typography variant="caption" color="warning.main">
+                          计划基线 {session.baseline.startTime}-{session.baseline.endTime} · {telescopeById(session.baseline.telescopeId)?.code ?? '-'}
+                          {nightById(session.baseline.nightId)?.date !== night.date ? ` · ${nightById(session.baseline.nightId)?.date}` : ''}
+                        </Typography>
+                      ) : null}
                       {altitude?.below ? <Chip size="small" color="warning" label={`高度角 ${altitude.altitude}° 低于阈值 ${target?.minAltitude}°`} /> : <Chip size="small" color="success" variant="outlined" label={`高度角 ${altitude?.altitude ?? '-'}°`} />}
-                      {session.rescheduleReason ? <Typography variant="caption" color="text.secondary">{session.rescheduleReason}</Typography> : null}
+                      {session.execution?.remark ? <Typography variant="caption" color="text.secondary">{session.execution.remark}</Typography> : session.rescheduleReason ? <Typography variant="caption" color="text.secondary">{session.rescheduleReason}</Typography> : null}
                     </Stack>
                   </CardContent>
                 </Card>

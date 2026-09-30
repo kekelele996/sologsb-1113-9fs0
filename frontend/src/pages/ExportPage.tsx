@@ -17,6 +17,7 @@ import { useSessionStore } from '../stores/sessionStore';
 import { useNightStore } from '../stores/nightStore';
 import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
+import { useExecutionStore } from '../stores/executionStore';
 import { NIGHT_TOTAL_MINUTES, TARGET_COLOR } from '../types';
 import { axisMinutes, timelineTicks } from '../utils/astro';
 import { buildNightPlanText, buildPlanCsv, downloadText, printPage } from '../utils/export';
@@ -31,6 +32,7 @@ export default function ExportPage() {
   const targets = useTargetStore((s) => s.targets);
   const telescopes = useEquipmentStore((s) => s.telescopes);
   const instruments = useEquipmentStore((s) => s.instruments);
+  const allRecords = useExecutionStore((s) => s.records);
   const { conflictsOfNight, conflictIds } = useConflictCheck();
   const [notice, setNotice] = useState('');
 
@@ -39,14 +41,16 @@ export default function ExportPage() {
   const conflicts = useMemo(() => conflictsOfNight(night?.id ?? ''), [conflictsOfNight, night?.id]);
   const ids = useMemo(() => conflictIds(night?.id), [conflictIds, night?.id]);
 
-  const planText = useMemo(
-    () => buildNightPlanText({ night, sessions: nightSessions, targets, telescopes, instruments }),
-    [night, nightSessions, targets, telescopes, instruments],
+  /** 当前夜计划基线涉及段的执行记录（含现场换到其它夜、或从其它夜换入的对账上下文） */
+  const nightSessionIds = useMemo(() => new Set(nightSessions.map((session) => session.id)), [nightSessions]);
+  const nightRecords = useMemo(() => allRecords.filter((record) => nightSessionIds.has(record.sessionId)), [allRecords, nightSessionIds]);
+  const exportContext = useMemo(
+    () => ({ night, sessions: nightSessions, targets, telescopes, instruments, records: nightRecords, nights }),
+    [night, nightSessions, targets, telescopes, instruments, nightRecords, nights],
   );
-  const csv = useMemo(
-    () => buildPlanCsv({ night, sessions: nightSessions, targets, telescopes, instruments }),
-    [night, nightSessions, targets, telescopes, instruments],
-  );
+
+  const planText = useMemo(() => buildNightPlanText(exportContext), [exportContext]);
+  const csv = useMemo(() => buildPlanCsv(exportContext), [exportContext]);
 
   const bars: TimelineBar[] = useMemo(
     () =>
@@ -73,7 +77,7 @@ export default function ExportPage() {
         导出当晚观测清单
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        汇总目标、时刻、滤镜与帧数为文本与 CSV，并支持打印视图；导出内容与时间轴预览保持一致。
+        汇总计划基线的目标、时刻、滤镜与帧数，并逐段附上执行回执的实际时段、望远镜与帧数差额；文本 / CSV / 打印视图内容一致。
       </Typography>
 
       {notice ? (
@@ -92,6 +96,19 @@ export default function ExportPage() {
         </TextField>
         <Chip size="small" label={`排程段 ${nightSessions.length}`} />
         <Chip size="small" label={`计划帧数合计 ${nightSessions.reduce((sum, session) => sum + session.plannedFrames, 0)}`} />
+        <Chip
+          size="small"
+          color={nightRecords.some((record) => {
+            const planned = nightSessions.find((session) => session.id === record.sessionId);
+            return planned && record.actualFrames < planned.plannedFrames;
+          }) ? 'error' : 'default'}
+          variant={nightRecords.length ? 'filled' : 'outlined'}
+          label={
+            nightRecords.length
+              ? `已回执 ${nightRecords.length} 段 · 实际帧 ${nightRecords.reduce((sum, record) => sum + record.actualFrames, 0)}`
+              : '暂无执行回执'
+          }
+        />
         <ConflictBadge conflicts={conflicts} />
         <Button
           variant="contained"
@@ -139,13 +156,32 @@ export default function ExportPage() {
               .sort((a, b) => axisMinutes(a.startTime) - axisMinutes(b.startTime))
               .map((session) => {
                 const target = targets.find((item) => item.id === session.targetId);
+                const record = nightRecords.find((item) => item.sessionId === session.id);
+                const delta = record ? record.actualFrames - session.plannedFrames : 0;
                 return (
                   <Stack key={session.id} direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                     <Chip size="small" label={`${session.startTime}-${session.endTime}`} />
                     <Typography variant="body2">{target?.name ?? '未知目标'}</Typography>
                     <Chip size="small" variant="outlined" label={session.filterSlot} />
-                    <Chip size="small" variant="outlined" label={`${session.plannedFrames} 帧`} />
+                    <Chip size="small" variant="outlined" label={`计划 ${session.plannedFrames} 帧`} />
                     <StatusChip status={session.status} />
+                    {record ? (
+                      <>
+                        <Chip
+                          size="small"
+                          color={delta < 0 ? 'error' : delta > 0 ? 'primary' : 'success'}
+                          label={`实际 ${record.actualStart}-${record.actualEnd} · ${telescopes.find((item) => item.id === record.actualTelescopeId)?.code ?? '-'} · ${record.actualFrames} 帧（${delta >= 0 ? '+' : ''}${delta}）`}
+                        />
+                        <Typography variant="caption" color="text.secondary">
+                          {record.batchNo}
+                          {record.actualNightId !== session.nightId ? ` · 实际夜 ${nights.find((item) => item.id === record.actualNightId)?.date ?? record.actualNightId}` : ''}
+                        </Typography>
+                      </>
+                    ) : (
+                      <Typography variant="caption" color="text.secondary">
+                        未回执
+                      </Typography>
+                    )}
                   </Stack>
                 );
               })}

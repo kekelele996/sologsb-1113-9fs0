@@ -40,12 +40,13 @@ export default function EquipmentPage() {
   const currentNightId = useNightStore((s) => s.currentNightId);
   const setCurrentNight = useNightStore((s) => s.setCurrentNight);
   const targets = useTargetStore((s) => s.targets);
-  const { conflictsOfNight } = useConflictCheck();
+  const { conflictsOfNight, effectiveSessions } = useConflictCheck();
 
   const [nightId, setNightId] = useState(currentNightId);
   const activeNightId = nightId || currentNightId;
   const night = nights.find((item) => item.id === activeNightId);
-  const nightSessions = useMemo(() => sessions.filter((session) => session.nightId === activeNightId), [sessions, activeNightId]);
+  // 占用按现场实际重算：有执行记录的段以实际观测夜 / 时段 / 望远镜为准，旧计划占用下线
+  const nightSessions = useMemo(() => effectiveSessions.filter((session) => session.nightId === activeNightId), [effectiveSessions, activeNightId]);
   const conflicts = useMemo(() => conflictsOfNight(activeNightId), [conflictsOfNight, activeNightId]);
   const slots = useMemo(() => Array.from({ length: NIGHT_TOTAL_MINUTES / SLOT_MINUTES }, (_, index) => index), []);
 
@@ -180,7 +181,7 @@ export default function EquipmentPage() {
                             </Typography>
                           </Tooltip>
                         ) : (
-                          <Tooltip title={`${items[0].startTime}-${items[0].endTime} ${target?.name ?? ''} · ${items[0].status}`}>
+                          <Tooltip title={`${items[0].startTime}-${items[0].endTime} ${target?.name ?? ''} · ${items[0].status}${items[0].deviated ? ' · 现场实际（与计划不符）' : ''}`}>
                             <Typography variant="caption" sx={{ whiteSpace: 'nowrap' }}>
                               {target?.name ?? '已排'}
                             </Typography>

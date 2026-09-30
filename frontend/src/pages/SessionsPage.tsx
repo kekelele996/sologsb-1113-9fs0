@@ -29,8 +29,10 @@ import { useSessionStore } from '../stores/sessionStore';
 import { useNightStore } from '../stores/nightStore';
 import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
+import { useExecutionStore } from '../stores/executionStore';
 import { FILTER_NAMES, SESSION_STATUSES, type SessionStatus } from '../types';
 import { axisMinutes, durationMinutes, formatMinutes } from '../utils/astro';
+import { toEffectiveSessions } from '../utils/effective';
 
 interface SessionFormState {
   nightId: string;
@@ -57,7 +59,12 @@ export default function SessionsPage() {
   const targets = useTargetStore((s) => s.targets);
   const telescopes = useEquipmentStore((s) => s.telescopes);
   const instruments = useEquipmentStore((s) => s.instruments);
+  const records = useExecutionStore((s) => s.records);
   const { findConflicts, conflictIds } = useConflictCheck();
+
+  /** 实际口径排程：列表时段 / 望远镜 / 观测夜列仍展示计划基线，执行结果单独成列 */
+  const effectiveList = useMemo(() => toEffectiveSessions(sessions, records), [sessions, records]);
+  const effectiveById = useMemo(() => new Map(effectiveList.map((session) => [session.id, session])), [effectiveList]);
 
   /** 支持从设备分配视图一键跳转：?night=<夜ID>&highlight=<排程段ID> */
   const [searchParams] = useSearchParams();
@@ -200,6 +207,7 @@ export default function SessionsPage() {
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         同一时段同一望远镜重复排入即进入冲突列表；支持勾选多个排程段批量改期到备用观测夜并填写改期原因。
+        列表中的观测夜、时段与望远镜为计划基线，执行回执导入后保持不变；现场实际时段、帧数与设备见「执行结果」列，冲突按实际口径重算。
       </Typography>
 
       {notice ? (
@@ -252,12 +260,13 @@ export default function SessionsPage() {
                   onChange={(event) => setSelected(event.target.checked ? visible.map((session) => session.id) : [])}
                 />
               </TableCell>
-              <TableCell>观测夜</TableCell>
-              <TableCell>时段</TableCell>
+              <TableCell>观测夜（计划）</TableCell>
+              <TableCell>时段（计划基线）</TableCell>
               <TableCell>目标</TableCell>
-              <TableCell>望远镜 / 终端</TableCell>
+              <TableCell>望远镜 / 终端（计划）</TableCell>
               <TableCell>滤镜</TableCell>
-              <TableCell align="right">帧数</TableCell>
+              <TableCell align="right">计划帧数</TableCell>
+              <TableCell>执行结果（现场实际）</TableCell>
               <TableCell>状态</TableCell>
               <TableCell>冲突</TableCell>
               <TableCell>改期原因</TableCell>
@@ -266,13 +275,16 @@ export default function SessionsPage() {
           </TableHead>
           <TableBody>
             {visible.map((session) => {
+              const effective = effectiveById.get(session.id);
               const conflicts = findConflicts({
-                nightId: session.nightId,
-                telescopeId: session.telescopeId,
-                startTime: session.startTime,
-                endTime: session.endTime,
+                nightId: effective?.nightId ?? session.nightId,
+                telescopeId: effective?.telescopeId ?? session.telescopeId,
+                startTime: effective?.startTime ?? session.startTime,
+                endTime: effective?.endTime ?? session.endTime,
                 ignoreSessionId: session.id,
               });
+              const execution = records.find((record) => record.sessionId === session.id);
+              const frameDelta = execution ? execution.actualFrames - session.plannedFrames : 0;
               return (
                 <TableRow
                   key={session.id}
@@ -303,6 +315,36 @@ export default function SessionsPage() {
                   <TableCell>{session.filterSlot}</TableCell>
                   <TableCell align="right">{session.plannedFrames}</TableCell>
                   <TableCell>
+                    {execution ? (
+                      <Stack spacing={0.25}>
+                        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                          <Chip
+                            size="small"
+                            color={frameDelta < 0 ? 'error' : frameDelta > 0 ? 'primary' : 'success'}
+                            variant={frameDelta < 0 ? 'filled' : 'outlined'}
+                            label={`${execution.actualStart}-${execution.actualEnd}`}
+                          />
+                          <Chip size="small" variant="outlined" label={telescopeById(execution.actualTelescopeId)?.code ?? execution.actualTelescopeId} />
+                          <Chip
+                            size="small"
+                            color={frameDelta < 0 ? 'error' : 'default'}
+                            variant={frameDelta < 0 ? 'filled' : 'outlined'}
+                            label={`${execution.actualFrames} 帧（${frameDelta >= 0 ? '+' : ''}${frameDelta}）`}
+                          />
+                        </Stack>
+                        <Typography variant="caption" color="text.secondary">
+                          {execution.actualNightId !== session.nightId ? `实际夜 ${nightById(execution.actualNightId)?.date ?? execution.actualNightId}；` : ''}
+                          批次 {execution.batchNo}
+                          {execution.remark ? ` · ${execution.remark}` : ''}
+                        </Typography>
+                      </Stack>
+                    ) : (
+                      <Typography variant="caption" color="text.secondary">
+                        未回执
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell>
                     <StatusChip status={session.status} />
                   </TableCell>
                   <TableCell>
@@ -324,7 +366,13 @@ export default function SessionsPage() {
                     <Button size="small" onClick={() => openEdit(session.id)}>
                       编辑
                     </Button>
-                    <Button size="small" color="error" onClick={() => void removeSession(session.id)}>
+                    <Button
+                      size="small"
+                      color="error"
+                      disabled={Boolean(execution)}
+                      title={execution ? '该段已有执行回执，计划基线需保留供逐段对账；如需撤回请到「执行回执对账」删除批次' : undefined}
+                      onClick={() => void removeSession(session.id)}
+                    >
                       删除
                     </Button>
                   </TableCell>

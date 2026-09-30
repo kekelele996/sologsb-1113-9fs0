@@ -19,6 +19,7 @@ import { useNightStore } from './stores/nightStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useTargetStore } from './stores/targetStore';
 import { useEquipmentStore } from './stores/equipmentStore';
+import { useExecutionStore } from './stores/executionStore';
 
 const DRAWER_WIDTH = 224;
 
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { path: '/targets', label: '观测目标库' },
   { path: '/sessions', label: '排程段与冲突' },
   { path: '/equipment', label: '设备分配视图' },
+  { path: '/receipts', label: '执行回执对账' },
   { path: '/export', label: '导出观测清单' },
 ];
 
@@ -40,17 +42,22 @@ export default function App() {
   const targets = useTargetStore((s) => s.targets);
   const telescopes = useEquipmentStore((s) => s.telescopes);
   const instruments = useEquipmentStore((s) => s.instruments);
+  const records = useExecutionStore((s) => s.records);
   const [toast, setToast] = useState(false);
 
   const night = nights.find((item) => item.id === currentNightId) ?? nights[0];
 
   const quickExport = () => {
+    const nightSessions = sessions.filter((session) => session.nightId === night?.id);
+    const nightSessionIds = new Set(nightSessions.map((session) => session.id));
     const text = buildNightPlanText({
       night,
-      sessions: sessions.filter((session) => session.nightId === night?.id),
+      sessions: nightSessions,
       targets,
       telescopes,
       instruments,
+      records: records.filter((record) => nightSessionIds.has(record.sessionId)),
+      nights,
     });
     downloadText(`观测清单-${night?.date ?? 'night'}.txt`, text);
     setToast(true);
